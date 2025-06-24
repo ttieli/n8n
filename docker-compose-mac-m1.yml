@@ -1,0 +1,191 @@
+version: '3.8'
+
+# n8n Docker Compose 配置 - Mac M芯片专用
+# 使用端口: 8967 (不常见端口)
+# 包含: n8n + PostgreSQL + Redis (可选)
+
+services:
+  # PostgreSQL 数据库
+  postgres:
+    image: postgres:16-alpine
+    platform: linux/arm64
+    container_name: n8n-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: n8n
+      POSTGRES_USER: n8n_user
+      POSTGRES_PASSWORD: n8n_secure_password_2024
+      PGDATA: /var/lib/postgresql/data/pgdata
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./backups:/backups  # 备份目录
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U n8n_user -d n8n']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - n8n_network
+
+  # Redis (可选 - 用于队列和缓存)
+  redis:
+    image: redis:7-alpine
+    platform: linux/arm64
+    container_name: n8n-redis
+    restart: unless-stopped
+    command: redis-server --requirepass redis_secure_password_2024
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ['CMD', 'redis-cli', '--no-auth-warning', '-a', 'redis_secure_password_2024', 'ping']
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    networks:
+      - n8n_network
+
+  # n8n 主服务
+  n8n:
+    image: n8nio/n8n:latest
+    platform: linux/arm64
+    container_name: n8n-main
+    restart: unless-stopped
+    ports:
+      - "8967:5678"  # 使用不常见端口 8967
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      # 基础配置
+      - N8N_HOST=0.0.0.0
+      - N8N_PORT=5678
+      - N8N_PROTOCOL=http
+      - WEBHOOK_URL=http://localhost:8967
+      - GENERIC_TIMEZONE=Asia/Shanghai
+      
+      # 数据库配置 (PostgreSQL)
+      - DB_TYPE=postgresdb
+      - DB_POSTGRESDB_HOST=postgres
+      - DB_POSTGRESDB_PORT=5432
+      - DB_POSTGRESDB_DATABASE=n8n
+      - DB_POSTGRESDB_USER=n8n_user
+      - DB_POSTGRESDB_PASSWORD=n8n_secure_password_2024
+      - DB_POSTGRESDB_SCHEMA=public
+      
+      # Redis 配置 (队列模式)
+      - QUEUE_BULL_REDIS_HOST=redis
+      - QUEUE_BULL_REDIS_PORT=6379
+      - QUEUE_BULL_REDIS_PASSWORD=redis_secure_password_2024
+      - EXECUTIONS_MODE=queue
+      
+      # 安全配置
+      - N8N_SECURE_COOKIE=false
+      - N8N_METRICS=true
+      - N8N_DIAGNOSTICS_ENABLED=false
+      
+      # Task Runner 配置
+      - N8N_RUNNERS_ENABLED=true
+      - N8N_RUNNERS_MODE=internal
+      
+      # 日志配置
+      - N8N_LOG_LEVEL=info
+      - N8N_LOG_OUTPUT=console
+      
+      # 性能配置
+      - N8N_CONCURRENCY_PRODUCTION_LIMIT=10
+      - EXECUTIONS_DATA_PRUNE=true
+      - EXECUTIONS_DATA_MAX_AGE=168  # 7天
+      
+      # 邮件配置 (可选)
+      # - N8N_EMAIL_MODE=smtp
+      # - N8N_SMTP_HOST=smtp.gmail.com
+      # - N8N_SMTP_PORT=587
+      # - N8N_SMTP_USER=your-email@gmail.com
+      # - N8N_SMTP_PASS=your-app-password
+      # - N8N_SMTP_SENDER=your-email@gmail.com
+      
+    volumes:
+      - n8n_data:/home/node/.n8n
+      - ./custom-nodes:/home/node/.n8n/custom  # 自定义节点目录
+      - ./workflows:/home/node/.n8n/workflows  # 工作流备份目录
+    networks:
+      - n8n_network
+    healthcheck:
+      test: ['CMD-SHELL', 'wget --spider -q http://localhost:5678/healthz || exit 1']
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # n8n Worker (可选 - 用于扩展处理能力)
+  n8n-worker:
+    image: n8nio/n8n:latest
+    platform: linux/arm64
+    container_name: n8n-worker
+    restart: unless-stopped
+    command: worker
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      n8n:
+        condition: service_healthy
+    environment:
+      # 基础配置
+      - GENERIC_TIMEZONE=Asia/Shanghai
+      
+      # 数据库配置
+      - DB_TYPE=postgresdb
+      - DB_POSTGRESDB_HOST=postgres
+      - DB_POSTGRESDB_PORT=5432
+      - DB_POSTGRESDB_DATABASE=n8n
+      - DB_POSTGRESDB_USER=n8n_user
+      - DB_POSTGRESDB_PASSWORD=n8n_secure_password_2024
+      
+      # Redis 配置
+      - QUEUE_BULL_REDIS_HOST=redis
+      - QUEUE_BULL_REDIS_PORT=6379
+      - QUEUE_BULL_REDIS_PASSWORD=redis_secure_password_2024
+      - EXECUTIONS_MODE=queue
+      - QUEUE_HEALTH_CHECK_ACTIVE=true
+      
+      # Worker 配置
+      - N8N_CONCURRENCY_PRODUCTION_LIMIT=5
+      - N8N_RUNNERS_ENABLED=true
+      - N8N_RUNNERS_MODE=internal
+      
+      # 安全配置
+      - N8N_DIAGNOSTICS_ENABLED=false
+      
+      # 日志配置
+      - N8N_LOG_LEVEL=info
+      - N8N_LOG_OUTPUT=console
+      
+    volumes:
+      - n8n_data:/home/node/.n8n
+    networks:
+      - n8n_network
+    healthcheck:
+      test: ['CMD-SHELL', 'ps aux | grep -v grep | grep n8n || exit 1']
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+# 数据卷
+volumes:
+  postgres_data:
+    driver: local
+  redis_data:
+    driver: local
+  n8n_data:
+    driver: local
+
+# 网络
+networks:
+  n8n_network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16
